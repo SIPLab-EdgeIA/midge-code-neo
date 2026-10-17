@@ -13,6 +13,7 @@
 #include "status_led.h"
 #include "storage.h"
 #include "time_control.h"
+#include "imu_interface.h"
 
 LOG_MODULE_REGISTER(main_module);
 struct init_item {
@@ -34,7 +35,7 @@ static int run_inits(const struct init_item* items, size_t n) {
 }
 
 int main() {
-    int ret = led_init();
+    int ret = led_init(); 
     if (ret < 0) {
         LOG_ERR("Failed to initialize LED");
         return ret;
@@ -51,6 +52,43 @@ int main() {
     };
 
     ret = run_inits(inits, ARRAY_SIZE(inits));
+
+
+    //test code to start imu
+
+    // Test IMU interface read_sample callback
+    if (ret == 0) {
+        LOG_INF("Starting IMU read_sample test");
+
+        for (int i = 0; i < 10; i++) {
+            struct imu_sample sample;
+
+            int imu_ret = imu_drv_api.read_sample(&sample);
+
+            if (imu_ret != 0) {
+                LOG_ERR("IMU read_sample failed: %d", imu_ret);
+                break;
+            }
+
+            LOG_INF("Accel [m/s^2]: X=%.3f, Y=%.3f, Z=%.3f",
+                    (double)sample.accel[0],
+                    (double)sample.accel[1],
+                    (double)sample.accel[2]);
+
+            LOG_INF("Gyro [rad/s]: X=%.3f, Y=%.3f, Z=%.3f",
+                    (double)sample.gyro[0],
+                    (double)sample.gyro[1],
+                    (double)sample.gyro[2]);
+
+            k_sleep(K_MSEC(500));
+        }
+
+        LOG_INF("IMU read_sample test finished");
+    }
+
+
+
+
 
     /*audio_sensor_start(2, 1);
     k_sleep(K_SECONDS(60*3));

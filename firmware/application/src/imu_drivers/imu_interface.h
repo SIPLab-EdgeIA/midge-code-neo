@@ -11,11 +11,18 @@
 
 #include "midge_protocol.h"
 
+
 struct imu_config {
     uint16_t acc_fsr;   // g
     uint16_t gyr_fsr;   // dps
     uint16_t datarate;  // Hz, applies to all sensors
 };
+
+struct imu_sample {
+    float accel[3]; /**< Accelerometer readings for X, Y, and Z axes. */
+    float gyro[3];  /**< Gyroscope readings for X, Y, and Z axes. */
+};
+
 
 struct imu_driver_interface {
     /**
@@ -41,15 +48,32 @@ struct imu_driver_interface {
      */
     int (*start)(int sample_iter);
 
+
+
+    /**
+     * @brief Read one accelerometer and gyroscope sample.
+     *
+     * Retrieves the current sensor measurements without starting the regular
+     * sampling process or storing data to the SD card.
+     *
+     * @param sample Pointer to the structure where the readings will be stored.
+     * @return 0 on success, negative error code on failure.
+     */
+    int (*read_sample)(struct imu_sample *sample);
+
     /**
      * @brief Stop IMU sensor sampling. Files are expected to be closed in
      * this function.
      *
      */
     int (*stop)(void);
+
 };
+
+
 
 // Expected to be defined in the IMU driver implementation file
 extern struct imu_driver_interface imu_drv_api;
+
 
 #endif  // MB_IMU_INTERFACE_H

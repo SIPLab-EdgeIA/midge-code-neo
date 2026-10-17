@@ -1,5 +1,6 @@
 #include "imu_interface.h"
 
+#include <stddef.h>
 #include <errno.h>
 #include <string.h>
 #include <zephyr/device.h>
@@ -7,6 +8,7 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/math_extras.h>
 
 #include "midge_protocol.h"
 #include "storage.h"
@@ -42,7 +44,54 @@ static struct {
     int current_sample;
 } sampling_state;
 
+
 static struct sensor_trigger trigger;
+
+
+/**
+ * @brief Read one accelerometer and gyroscope sample.
+ *
+ * Fetches the latest sensor data and stores the accelerometer and
+ * gyroscope readings in the provided structure. This function does
+ * not write measurements to the SD card.
+ *
+ * @param sample Pointer to the structure where the readings are stored.
+ * @return 0 on success, negative error code on failure.
+ */
+static int imu_read_sample(struct imu_sample *sample)
+{
+    if (sample == NULL) {
+        return -EINVAL;
+    }
+
+    struct sensor_value accel[3];
+    struct sensor_value gyro[3];
+
+    int rc = sensor_sample_fetch(imu_dev);
+    if (rc != 0) {
+        LOG_ERR("IMU sample fetch failed: %d", rc);
+        return rc;
+    }
+
+    rc = sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel);
+    if (rc != 0) {
+        LOG_ERR("Accelerometer read failed: %d", rc);
+        return rc;
+    }
+
+    rc = sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro);
+    if (rc != 0) {
+        LOG_ERR("Gyroscope read failed: %d", rc);
+        return rc;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        sample->accel[i] = (float)sensor_value_to_double(&accel[i]);
+        sample->gyro[i] = (float)sensor_value_to_double(&gyro[i]);
+    }
+
+    return 0;
+}
 
 static int fetch_and_store_sample() {
     struct sensor_value accel[3];
@@ -64,11 +113,23 @@ static int fetch_and_store_sample() {
         return rc;
     }
 
+    LOG_INF("Accel [m/s^2]: X=%.6f Y=%.6f Z=%.6f",
+        (double)sensor_value_to_float(&accel[0]),
+        (double)sensor_value_to_float(&accel[1]),
+        (double)sensor_value_to_float(&accel[2]));
+
+
     rc = sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro);
     if (rc != 0) {
         LOG_ERR("gyro channel read failed: %d", rc);
         return rc;
     }
+
+
+    LOG_INF("Gyro [rad/s]: X=%.6f Y=%.6f Z=%.6f",
+        (double)sensor_value_to_float(&gyro[0]),
+        (double)sensor_value_to_float(&gyro[1]),
+        (double)sensor_value_to_float(&gyro[2]));
 
     // magnetometer
     rc = sensor_sample_fetch(mag_dev);
@@ -244,7 +305,8 @@ static int start(int sample_iter) {
 }
 
 static int stop(void) {
-    int ret = sensor_trigger_set(imu_dev, &trigger, NULL);
+    int ret = sensor_trigger_set(imu_dev, &trigger
+        , NULL);
     if (ret == 0) {
         (void)storage_close(FILE_TYPE_ACCEL);
         (void)storage_close(FILE_TYPE_GYRO);
@@ -256,6 +318,7 @@ static int stop(void) {
 struct imu_driver_interface imu_drv_api = {
     .init = init,
     .set_config = set_config,
+    .read_sample = imu_read_sample,
     .start = start,
     .stop = stop,
 };
