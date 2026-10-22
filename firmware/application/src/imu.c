@@ -4,11 +4,13 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
+#include <math.h>
 
 #include "imu_interface.h"
 #include "midge_protocol.h"
 #include "storage.h"
 #include "utility.h"
+
 
 LOG_MODULE_REGISTER(imu);
 
@@ -64,6 +66,8 @@ int imu_sensor_stop() {
     }
     return ret;
 }
+
+
 
 struct start_imu_work_ctx {
     struct k_work work;
@@ -130,4 +134,183 @@ int cmd_stop_imu(uint8_t* data) {
     }
     resp_data->status_code = ret;
     return ret;
+}
+
+/**
+ * @brief Checks whether two IMU samples meet the stationary criteria.
+ *
+ * Checks that the accelerometer and gyroscope readings do not vary
+ * more than their configured tolerances. It also checks that each
+ * gyroscope axis remains close to zero.
+ *
+ * When the same sample is passed as both arguments, the function
+ * checks only whether the gyroscope readings are close to zero.
+ *
+ * @param previous Pointer to the previous IMU sample.
+ * @param current Pointer to the current IMU sample.
+ *
+ * @return 0 if the readings meet the criteria,
+ *         -EINVAL if either pointer is NULL,
+ *         or -EAGAIN if a tolerance is exceeded.
+ */
+static int imu_calibration_calculate_error(
+    const struct imu_sample *previous,
+    const struct imu_sample *current)
+{
+    if (previous == NULL || current == NULL) {
+        return -EINVAL;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+        // Check that the gyroscope reading is close to zero.
+        if (fabsf(current->gyro[axis]) >
+            IMU_CALIBRATION_GYRO_ERROR) {
+            return -EAGAIN;
+        }
+
+        // Check the variation between consecutive accelerometer samples.
+        float accel_diff =
+            current->accel[axis] - previous->accel[axis];
+
+        if (fabsf(accel_diff) > IMU_CALIBRATION_ACCEL_ERROR) {
+            return -EAGAIN;
+        }
+
+        // Check the variation between consecutive gyroscope samples.
+        float gyro_diff =
+            current->gyro[axis] - previous->gyro[axis];
+
+        if (fabsf(gyro_diff) > IMU_CALIBRATION_GYRO_ERROR) {
+            return -EAGAIN;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Checks whether the device remains stationary during sampling.
+ *
+ * Reads IMU_CALIBRATION_SAMPLE_COUNT samples and checks each sample
+ * against the previous one using imu_calibration_calculate_error().
+ *
+ * @return 0 if all samples meet the stationary criteria,
+ *         -EAGAIN if movement or excessive variation is detected,
+ *         or another negative error code if a sensor read fails.
+ */
+int imu_calibration_check_stationary(void)
+{
+    struct imu_sample previous_sample;
+
+    // Read the first sample.
+    int ret = imu_drv_api.read_sample(&previous_sample);
+    if (ret != 0) {
+        LOG_ERR("Failed to read initial stationary check sample: %d", ret);
+        return ret;
+    }
+
+    // Check the initial gyroscope readings.
+    ret = imu_calibration_calculate_error(
+        &previous_sample, &previous_sample);
+
+    if (ret != 0) {
+        return ret;
+    }
+
+    // Read and validate the remaining samples.
+    for (int i = 1; i < IMU_CALIBRATION_SAMPLE_COUNT; i++) {
+        struct imu_sample current_sample;
+
+        ret = imu_drv_api.read_sample(&current_sample);
+        if (ret != 0) {
+            LOG_ERR("Failed to read stationary check sample %d: %d",
+                    i, ret);
+            return ret;
+        }
+
+        ret = imu_calibration_calculate_error(
+            &previous_sample, &current_sample);
+
+        if (ret != 0) {
+            return ret;
+        }
+
+        // Keep the current sample for the next comparison.
+        previous_sample = current_sample;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Collects IMU samples, verifies stability, and calculates averages.
+ *
+ * Each sample is checked before its readings are added to the sums.
+ * The averages are stored only if all samples meet the stationary criteria.
+ *
+ * @param measurement Pointer to the structure where the averages
+ *                    will be stored.
+ *
+ * @return 0 on success,
+ *         -EINVAL if measurement is NULL,
+ *         -EAGAIN if movement or excessive variation is detected,
+ *         or another negative error code if a sensor read fails.
+ */
+int imu_calibration_collect_average(
+    struct imu_calibration_measurement *measurement)
+{
+    if (measurement == NULL) {
+        return -EINVAL;
+    }
+
+    // Initialize the sums for the accelerometer and gyroscope axes.
+    float accel_sum[3] = {0.0f, 0.0f, 0.0f};
+    float gyro_sum[3] = {0.0f, 0.0f, 0.0f};
+
+    struct imu_sample previous_sample = {0};
+
+    // Read and validate the configured number of samples.
+    for (int i = 0; i < IMU_CALIBRATION_SAMPLE_COUNT; i++) {
+        struct imu_sample current_sample;
+
+        int ret = imu_drv_api.read_sample(&current_sample);
+        if (ret != 0) {
+            LOG_ERR("Failed to read calibration sample %d: %d", i, ret);
+            return ret;
+        }
+
+        // Validate the first sample and compare subsequent samples.
+        if (i == 0) {
+            ret = imu_calibration_calculate_error(
+                &current_sample, &current_sample);
+        } else {
+            ret = imu_calibration_calculate_error(
+                &previous_sample, &current_sample);
+        }
+
+        if (ret != 0) {
+            LOG_WRN("Movement detected during calibration at sample %d", i);
+            return ret;
+        }
+
+        // Accumulate readings only after the sample passes validation.
+        for (int axis = 0; axis < 3; axis++) {
+            accel_sum[axis] += current_sample.accel[axis];
+            gyro_sum[axis] += current_sample.gyro[axis];
+        }
+
+        // Save the current sample for the next comparison.
+        previous_sample = current_sample;
+    }
+
+    // Calculate and store the average for each axis.
+    for (int axis = 0; axis < 3; axis++) {
+        measurement->accel[axis] =
+            accel_sum[axis] / (float)IMU_CALIBRATION_SAMPLE_COUNT;
+
+        measurement->gyro[axis] =
+            gyro_sum[axis] / (float)IMU_CALIBRATION_SAMPLE_COUNT;
+    }
+
+    return 0;
 }

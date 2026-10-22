@@ -4,7 +4,13 @@
 #include <inttypes.h>
 
 /** Number of samples collected for each IMU calibration measurement. */
-#define IMU_CALIBRATION_SAMPLE_COUNT 100
+#define IMU_CALIBRATION_SAMPLE_COUNT 10
+
+/** Maximum allowed gyroscope reading while the device is stationary (rad/s). */
+#define IMU_CALIBRATION_GYRO_ERROR 0.05f
+
+/** Maximum allowed accelerometer variation between samples (m/s^2). */
+#define IMU_CALIBRATION_ACCEL_ERROR 0.15f
 
 /**
  * @brief Stores the average accelerometer and gyroscope measurements
@@ -51,5 +57,28 @@ int imu_sensor_stop();
 int cmd_start_imu(uint8_t* data);
 
 int cmd_stop_imu(uint8_t* data);
+
+int imu_calibration_check_stationary(void);
+
+
+/**
+ * @brief Collects IMU samples, verifies their stability, and calculates
+ *        the average accelerometer and gyroscope readings.
+ *
+ * The average is calculated only if all collected samples meet the
+ * stationary criteria.
+ *
+ * @param measurement Pointer to the structure where the averages
+ *                    will be stored.
+ *
+ * @return 0 on success,
+ *         -EINVAL if measurement is NULL,
+ *         -EAGAIN if movement or excessive variation is detected,
+ *         or another negative error code if a sensor read fails.
+ */
+int imu_calibration_collect_average(
+    struct imu_calibration_measurement *measurement);
+
+
 
 #endif  // MBFW_IMU_H
