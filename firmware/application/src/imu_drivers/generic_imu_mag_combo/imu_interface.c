@@ -66,7 +66,6 @@ static int imu_read_sample(struct imu_sample *sample)
 
     struct sensor_value accel[3];
     struct sensor_value gyro[3];
-
     int rc = sensor_sample_fetch(imu_dev);
     if (rc != 0) {
         LOG_ERR("IMU sample fetch failed: %d", rc);

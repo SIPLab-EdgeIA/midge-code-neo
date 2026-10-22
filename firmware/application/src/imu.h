@@ -2,6 +2,8 @@
 #define MBFW_IMU_H
 
 #include <inttypes.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 /** Number of samples collected for each IMU calibration measurement. */
 #define IMU_CALIBRATION_SAMPLE_COUNT 10
@@ -11,6 +13,8 @@
 
 /** Maximum allowed accelerometer variation between samples (m/s^2). */
 #define IMU_CALIBRATION_ACCEL_ERROR 0.15f
+
+#define IMU_CALIBRATION_ORIENTATION_TOLERANCE 0.2f
 
 /**
  * @brief Stores the average accelerometer and gyroscope measurements
@@ -36,6 +40,15 @@ enum imu_calibration_orientation {
 };
 
 /**
+ * @brief Result of an IMU calibration orientation check.
+ */
+enum imu_calibration_result {
+    IMU_CALIBRATION_OK = 0,
+    IMU_CALIBRATION_MOVEMENT_DETECTED,
+    IMU_CALIBRATION_WRONG_ORIENTATION
+};
+
+/**
  * @brief Stores calibration measurements for all six orientations.
  *
  * Each array entry corresponds to the orientation with the same index
@@ -44,6 +57,8 @@ enum imu_calibration_orientation {
 struct imu_calibration_data {
     struct imu_calibration_measurement
         measurements[IMU_CALIBRATION_ORIENTATION_COUNT];
+
+    bool completed[IMU_CALIBRATION_ORIENTATION_COUNT];
 };
 
 uint8_t imu_sensor_get_status();
@@ -78,6 +93,21 @@ int imu_calibration_check_stationary(void);
  */
 int imu_calibration_collect_average(
     struct imu_calibration_measurement *measurement);
+
+
+int imu_calibration_check_orientation(
+    enum imu_calibration_orientation orientation,
+    struct imu_calibration_measurement *measurement);    
+
+int imu_calibration_store_measurement(
+    struct imu_calibration_data *calibration_data,
+    enum imu_calibration_orientation orientation,
+    const struct imu_calibration_measurement *measurement);
+
+int imu_calibration_get_missing_orientations(
+    const struct imu_calibration_data *calibration_data,
+    enum imu_calibration_orientation *missing_orientations,
+    size_t max_orientations);
 
 
 

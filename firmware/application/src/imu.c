@@ -12,6 +12,11 @@
 #include "utility.h"
 
 
+// INCLUDE SECCION FOR TEST
+#include <zephyr/shell/shell.h>
+#include <string.h>
+
+
 LOG_MODULE_REGISTER(imu);
 
 static uint8_t imu_sensor_state = SENSOR_STATE_DISABLED;
@@ -66,8 +71,6 @@ int imu_sensor_stop() {
     }
     return ret;
 }
-
-
 
 struct start_imu_work_ctx {
     struct k_work work;
@@ -314,3 +317,363 @@ int imu_calibration_collect_average(
 
     return 0;
 }
+
+/**
+ * @brief Checks whether the measured acceleration matches an orientation.
+ *
+ * Collects stable IMU measurements and compares the average acceleration
+ * against the expected gravity vector for the requested orientation.
+ *
+ * @param orientation Expected calibration orientation.
+ * @param measurement Output structure for the collected averages.
+ *
+ * @return IMU_CALIBRATION_OK if the orientation is correct,
+ *         IMU_CALIBRATION_MOVEMENT_DETECTED if movement is detected,
+ *         IMU_CALIBRATION_WRONG_ORIENTATION if the pose does not match,
+ *         or a negative error code if an argument or sensor operation fails.
+ */
+int imu_calibration_check_orientation(
+    enum imu_calibration_orientation orientation,
+    struct imu_calibration_measurement *measurement)
+{
+    if (measurement == NULL ||
+        orientation < IMU_CALIBRATION_ORIENTATION_X_POS ||
+        orientation >= IMU_CALIBRATION_ORIENTATION_COUNT) {
+        return -EINVAL;
+    }
+
+    int ret = imu_calibration_collect_average(measurement);
+
+    if (ret == -EAGAIN) {
+        return IMU_CALIBRATION_MOVEMENT_DETECTED;
+    }
+
+    if (ret != 0) {
+        return ret;
+    }
+
+    const float gravity = 9.81f;
+    const float tolerance = IMU_CALIBRATION_ORIENTATION_TOLERANCE;
+
+    float expected[3] = {0.0f, 0.0f, 0.0f};
+
+    switch (orientation) {
+    case IMU_CALIBRATION_ORIENTATION_X_POS:
+        expected[0] = gravity;
+        break;
+
+    case IMU_CALIBRATION_ORIENTATION_X_NEG:
+        expected[0] = -gravity;
+        break;
+
+    case IMU_CALIBRATION_ORIENTATION_Y_POS:
+        expected[1] = gravity;
+        break;
+
+    case IMU_CALIBRATION_ORIENTATION_Y_NEG:
+        expected[1] = -gravity;
+        break;
+
+    case IMU_CALIBRATION_ORIENTATION_Z_POS:
+        expected[2] = gravity;
+        break;
+
+    case IMU_CALIBRATION_ORIENTATION_Z_NEG:
+        expected[2] = -gravity;
+        break;
+
+    default:
+        return -EINVAL;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+        if (fabsf(measurement->accel[axis] - expected[axis]) > tolerance) {
+            return IMU_CALIBRATION_WRONG_ORIENTATION;
+        }
+    }
+
+    return IMU_CALIBRATION_OK;
+}
+
+/**
+ * @brief Stores a calibration measurement for a specific orientation.
+ *
+ * @param calibration_data Calibration data structure.
+ * @param orientation Orientation associated with the measurement.
+ * @param measurement Measurement to store.
+ *
+ * @return 0 on success, or -EINVAL if an argument is invalid.
+ */
+int imu_calibration_store_measurement(
+    struct imu_calibration_data *calibration_data,
+    enum imu_calibration_orientation orientation,
+    const struct imu_calibration_measurement *measurement)
+{
+    if (calibration_data == NULL || measurement == NULL ||
+        orientation < IMU_CALIBRATION_ORIENTATION_X_POS ||
+        orientation >= IMU_CALIBRATION_ORIENTATION_COUNT) {
+        return -EINVAL;
+    }
+
+    calibration_data->measurements[orientation] = *measurement;
+    calibration_data->completed[orientation] = true;
+
+    return 0;
+}
+
+/**
+ * @brief Gets the orientations that have not been calibrated yet.
+ *
+ * @param calibration_data Calibration data to inspect.
+ * @param missing_orientations Output array for missing orientations.
+ * @param max_orientations Maximum number of entries in the output array.
+ *
+ * @return Number of missing orientations, or a negative error code.
+ */
+int imu_calibration_get_missing_orientations(
+    const struct imu_calibration_data *calibration_data,
+    enum imu_calibration_orientation *missing_orientations,
+    size_t max_orientations)
+{
+    if (calibration_data == NULL ||
+        (missing_orientations == NULL && max_orientations > 0)) {
+        return -EINVAL;
+    }
+
+    int missing_count = 0;
+
+    for (int i = 0; i < IMU_CALIBRATION_ORIENTATION_COUNT; i++) {
+        if (!calibration_data->completed[i]) {
+            if ((size_t)missing_count < max_orientations) {
+                missing_orientations[missing_count] =
+                    (enum imu_calibration_orientation)i;
+            }
+
+            missing_count++;
+        }
+    }
+
+    if ((size_t)missing_count > max_orientations) {
+        return -ENOMEM;
+    }
+
+    return missing_count;
+}
+
+
+// ################ DEBUG COMMANDS ################
+
+/*
+ * Calibration data retained while the firmware is running.
+ */
+static struct imu_calibration_data imu_debug_calibration_data;
+
+/**
+ * @brief Converts a console argument into an orientation enum.
+ */
+static int imu_debug_parse_orientation(
+    const char *name,
+    enum imu_calibration_orientation *orientation)
+{
+    if (name == NULL || orientation == NULL) {
+        return -EINVAL;
+    }
+
+    if (strcmp(name, "+X") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_X_POS;
+    } else if (strcmp(name, "-X") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_X_NEG;
+    } else if (strcmp(name, "+Y") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_Y_POS;
+    } else if (strcmp(name, "-Y") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_Y_NEG;
+    } else if (strcmp(name, "+Z") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_Z_POS;
+    } else if (strcmp(name, "-Z") == 0) {
+        *orientation = IMU_CALIBRATION_ORIENTATION_Z_NEG;
+    } else {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Returns a readable orientation name.
+ */
+static const char *imu_debug_orientation_name(
+    enum imu_calibration_orientation orientation)
+{
+    switch (orientation) {
+    case IMU_CALIBRATION_ORIENTATION_X_POS:
+        return "+X";
+    case IMU_CALIBRATION_ORIENTATION_X_NEG:
+        return "-X";
+    case IMU_CALIBRATION_ORIENTATION_Y_POS:
+        return "+Y";
+    case IMU_CALIBRATION_ORIENTATION_Y_NEG:
+        return "-Y";
+    case IMU_CALIBRATION_ORIENTATION_Z_POS:
+        return "+Z";
+    case IMU_CALIBRATION_ORIENTATION_Z_NEG:
+        return "-Z";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+/**
+ * @brief Checks and stores one calibration orientation.
+ *
+ * Usage: imu_calibration check +X
+ */
+static int imu_debug_calibration_check(
+    const struct shell *shell,
+    size_t argc,
+    char **argv)
+{
+    ARG_UNUSED(argc);
+
+    enum imu_calibration_orientation orientation;
+
+    if (imu_debug_parse_orientation(argv[1], &orientation) != 0) {
+        shell_error(shell, "Invalid orientation.");
+        shell_print(shell, "Use +X, -X, +Y, -Y, +Z or -Z.");
+        return -EINVAL;
+    }
+
+    shell_print(shell,
+                "Checking orientation %s. Keep the IMU still.",
+                imu_debug_orientation_name(orientation));
+
+    struct imu_calibration_measurement measurement;
+
+    int ret = imu_calibration_check_orientation(
+        orientation,
+        &measurement
+    );
+
+    if (ret == IMU_CALIBRATION_MOVEMENT_DETECTED) {
+        shell_warn(shell, "Movement detected. Please try again.");
+        return 0;
+    }
+
+    if (ret == IMU_CALIBRATION_WRONG_ORIENTATION) {
+        shell_warn(shell,
+                   "Wrong orientation. Expected %s.",
+                   imu_debug_orientation_name(orientation));
+        return 0;
+    }
+
+    if (ret != IMU_CALIBRATION_OK) {
+        shell_error(shell, "Orientation check failed: %d", ret);
+        return ret;
+    }
+
+    ret = imu_calibration_store_measurement(
+        &imu_debug_calibration_data,
+        orientation,
+        &measurement
+    );
+
+    if (ret != 0) {
+        shell_error(shell, "Failed to store measurement: %d", ret);
+        return ret;
+    }
+
+    shell_print(shell,
+                "Orientation %s verified and stored.",
+                imu_debug_orientation_name(orientation));
+
+    shell_print(shell,
+                "Accel [m/s^2]: X=%.3f, Y=%.3f, Z=%.3f",
+                (double)measurement.accel[0],
+                (double)measurement.accel[1],
+                (double)measurement.accel[2]);
+
+    shell_print(shell,
+                "Gyro [rad/s]: X=%.3f, Y=%.3f, Z=%.3f",
+                (double)measurement.gyro[0],
+                (double)measurement.gyro[1],
+                (double)measurement.gyro[2]);
+
+    return 0;
+}
+
+/**
+ * @brief Displays calibration progress.
+ *
+ * Usage: imu_calibration status
+ */
+static int imu_debug_calibration_status(
+    const struct shell *shell,
+    size_t argc,
+    char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    enum imu_calibration_orientation missing[
+        IMU_CALIBRATION_ORIENTATION_COUNT
+    ];
+
+    int count = imu_calibration_get_missing_orientations(
+        &imu_debug_calibration_data,
+        missing,
+        ARRAY_SIZE(missing)
+    );
+
+    if (count < 0) {
+        shell_error(shell,
+                    "Failed to get calibration status: %d",
+                    count);
+        return count;
+    }
+
+    shell_print(shell,
+                "Completed orientations: %d/%d",
+                IMU_CALIBRATION_ORIENTATION_COUNT - count,
+                IMU_CALIBRATION_ORIENTATION_COUNT);
+
+    if (count == 0) {
+        shell_print(shell, "Calibration complete.");
+        return 0;
+    }
+
+    shell_print(shell, "Missing orientations:");
+
+    for (int i = 0; i < count; i++) {
+        shell_print(shell, "  %s",
+                    imu_debug_orientation_name(missing[i]));
+    }
+
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+    imu_debug_calibration_commands,
+    SHELL_CMD_ARG(
+        check,
+        NULL,
+        "Check and store an orientation: check <orientation>",
+        imu_debug_calibration_check,
+        2,
+        0
+    ),
+    SHELL_CMD(
+        status,
+        NULL,
+        "Show calibration progress",
+        imu_debug_calibration_status
+    ),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(
+    imu_calibration,
+    &imu_debug_calibration_commands,
+    "IMU calibration debug commands",
+    NULL
+);
+
+// ################ END DEBUG COMMANDS ################
