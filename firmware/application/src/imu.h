@@ -95,15 +95,54 @@ int imu_calibration_collect_average(
     struct imu_calibration_measurement *measurement);
 
 
+
+/**
+ * @brief Checks whether the IMU is in the specified orientation.
+ *
+ * Collects averaged IMU measurements, checks whether the sensor is stationary,
+ * and validates the accelerometer readings against the expected orientation.
+ *
+ * @param orientation Expected calibration orientation.
+ * @param measurement Pointer to store the averaged accelerometer and gyroscope
+ *                    measurements.
+ *
+ * @return 0 if the orientation is valid, a calibration result code if movement
+ *         or an incorrect orientation is detected, or a negative error code
+ *         if the operation fails.
+ */
 int imu_calibration_check_orientation(
     enum imu_calibration_orientation orientation,
-    struct imu_calibration_measurement *measurement);    
+    struct imu_calibration_measurement *measurement);
 
+/**
+ * @brief Stores a measurement for the specified calibration orientation.
+ *
+ * Copies the measurement into the corresponding entry in the calibration data
+ * and marks the orientation as completed.
+ *
+ * @param calibration_data Pointer to the calibration data structure.
+ * @param orientation Orientation associated with the measurement.
+ * @param measurement Pointer to the measurement to store.
+ *
+ * @return 0 on success, or a negative error code if the arguments are invalid.
+ */
 int imu_calibration_store_measurement(
     struct imu_calibration_data *calibration_data,
     enum imu_calibration_orientation orientation,
     const struct imu_calibration_measurement *measurement);
 
+/**
+ * @brief Gets the orientations that have not yet been calibrated.
+ *
+ * Fills the output array with the missing orientations, up to the specified
+ * capacity.
+ *
+ * @param calibration_data Pointer to the calibration data structure.
+ * @param missing_orientations Array to store the missing orientations.
+ * @param max_orientations Maximum number of orientations the array can hold.
+ *
+ * @return Number of missing orientations, or a negative error code on failure.
+ */
 int imu_calibration_get_missing_orientations(
     const struct imu_calibration_data *calibration_data,
     enum imu_calibration_orientation *missing_orientations,
